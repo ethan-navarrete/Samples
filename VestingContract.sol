@@ -141,7 +141,7 @@ contract VestingContract is Ownable, ReentrancyGuard {
     // ----------------- Withdraw Fxn ----------------------
 
     function claimTokens() external nonReentrant notContract() {
-        require(getElapsedTime() > 10 days , "You have not waited the 30-day cliff period!");
+        require(getElapsedTime() > 10 days , "You have not waited the 10-day cliff period!");
         uint256 original = Allotments[msg.sender].allotedToken0; // initial allotment
         uint256 withdrawn = Allotments[msg.sender].claimedToken0; // amount user has claimed
         uint256 available = original.sub(withdrawn); // amount left that can be claimed
@@ -233,7 +233,7 @@ contract VestingContract is Ownable, ReentrancyGuard {
     // ----------------------- View Function To Calculate Withdraw Amt. -----
 
     function calculateWithdrawableAmounts(address _address) external view returns (uint256, uint256, uint256) {
-        require(getElapsedTime() > 10 days , "You have not waited the 30-day cliff period! Your withdrawable amounts are 0.");
+        require(getElapsedTime() > 10 days , "You have not waited the 10-day cliff period! Your withdrawable amounts are 0.");
         uint256 original = Allotments[_address].allotedToken0; // initial allotment
         uint256 withdrawn = Allotments[_address].claimedToken0; // amount user has claimed
         uint256 available = original.sub(withdrawn); // amount left that can be claimed
