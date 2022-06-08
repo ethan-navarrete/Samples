@@ -2,7 +2,8 @@
 pragma solidity ^0.8.13;
 
 /*********
-A smart contract developed from scratch that grants users the ability to withdraw 10% of their alloted token balance every week.
+A smart contract developed from scratch that grants users the ability to withdraw 10% of their alloted token balance every week. Two other tokens,
+denoted as "Token1" and "Token2" are reward tokens that are also distributed propotionally based on a user's weighted balance
 *********/
 
 import "@openzeppelin/contracts/access/Ownable.sol";
