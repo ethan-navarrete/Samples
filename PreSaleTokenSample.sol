@@ -1,8 +1,14 @@
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.13;
+
 /*
 Code snippet from a contract which keeps snapshot balances of staked tokens and allows users to claim multiple different reward tokens once and only once.
 This sample was coded from scratch (with the exception of the ERC-20 snapshot framework code).
 */
-    
+
+contract SampleCode { 
     // copied from source: https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/extensions/ERC20Snapshot.sol
 
     using Arrays for uint256[];
