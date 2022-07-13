@@ -29,7 +29,7 @@ contract CoinFlipRNG is VRFConsumerBaseV2 {
   }
 
   // Assumes the subscription is funded sufficiently.
-  function requestRandomWords() external {
+  function requestRandomWords() external onlyCoinFlipContract {
     // Will revert if subscription is not set and funded.
     s_requestId = COORDINATOR.requestRandomWords(
       keyHash,
@@ -47,7 +47,7 @@ contract CoinFlipRNG is VRFConsumerBaseV2 {
     s_randomWords = randomWords;
   }
 
-  function flipCoin() external view returns (uint256) {
+  function flipCoin() external view onlyCoinFlipContract returns (uint256) {
     require(s_randomWords[0] != 0 , "Random number has not yet been requested");
     return s_randomWords[0] % 2;
   }
