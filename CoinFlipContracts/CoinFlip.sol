@@ -1,4 +1,3 @@
-
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
@@ -6,9 +5,10 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/ICoinFlipRNG.sol";
+import "./interfaces/IApple.sol";
 
-// contract that allows users to bet on a coin flip. RNG contract must be deployed first. 
-// ********** THIS CONTRACT IS NOT YET FINALIZED AS OF 08 JUNE 2022 ********************
+// contract that allows users to bet on a coin flip. RNG contract must be deployed first.
+// uses VRFv2 Oracle
 
 contract CoinFlip is Ownable, ReentrancyGuard {
 
@@ -17,8 +17,9 @@ contract CoinFlip is Ownable, ReentrancyGuard {
     //----- Interfaces/Addresses -----
 
     ICoinFlipRNG public CoinFlipRNG;
+    IApple public AppleInterface;
     address public CoinFlipRNGAddress;
-    address public Token;
+    address public Apple;
     address public devWallet;
 
     //----- Mappings -----------------
@@ -26,23 +27,37 @@ contract CoinFlip is Ownable, ReentrancyGuard {
     mapping(address => mapping(uint256 => Bet)) public Bets; // keeps track of each players bet for each sessionId
     mapping(address => mapping(uint256 => bool)) public HasBet; // keeps track of whether or not a user has bet in a certain session #
     mapping(address => mapping(uint256 => bool)) public HasClaimed; // keeps track of users and whether or not they have claimed reward for a session
+    mapping(address => mapping(uint256 => bool)) public HasBeenRefunded; // keeps track of whether or not a user has been refunded for a particular session
     mapping(address => mapping(uint256 => uint256)) public PlayerRewardPerSession; // keeps track of player rewards per session
+    mapping(address => mapping(uint256 => uint256)) public PlayerRefundPerSession; // keeps track of player refunds per session
     mapping(address => uint256) public TotalRewards;
     mapping(uint256 => Session) private _sessions;
+    mapping(address => bool) public Operators; // contract operators 
 
     //----- Lottery State Variables ---------------
 
-    uint256 public maxDuration = 60 seconds;
-    uint256 public minDuration = 5 seconds;
-    uint256 public constant maxDevFee = 200; // 2%
-    uint256 currentSessionId;
+    uint256 public maxDuration;
+    uint256 public minDuration;
+    uint256 public constant maxDevFee = 1000; // 10%
+    uint256 public currentSessionId;
+    uint256 constant accuracyFactor = 1 * 10**18;
+    bool public autoBurnEnabled; // automatic burn fxn variable when devFee is collected
+    bool public autoStartSessionEnabled; // automatic bool to determine whether or not new sessions start automatically when closeSession is called
+
+    //----- Default Parameters for Session -------
+
+    uint256 public defaultLength; // in SECONDS
+    uint256 public defaultMaxBet; 
+    uint256 public defaultMinBet; // > 0
+    uint256 public defaultDevFee; // 200: 2%
 
     // status for betting sessions
     enum Status {
         Closed,
         Open,
         Standby,
-        Disbursing
+        Voided,
+        Claimable
     }
 
     // player bet
@@ -62,9 +77,13 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         uint256 maxBet;
         uint256 headsCount;
         uint256 tailsCount;
-        uint256 collectedToken;
-        uint256 TokenForDisbursal;
+        uint256 headsApple;
+        uint256 tailsApple;
+        uint256 injectedApple;
+        uint256 collectedApple;
+        uint256 appleForDisbursal;
         uint256 totalPayouts;
+        uint256 totalRefunds;
         uint256 devFee;
         uint256 flipResult;
     }
@@ -91,14 +110,35 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         uint256 endTime,
         uint256 headsCount,
         uint256 tailsCount,
-        uint256 collectedToken
+        uint256 headsApple,
+        uint256 tailsApple,
+        uint256 injectedApple,
+        uint256 collectedApple
+    );
+
+    event SessionVoided(
+        uint256 indexed sessionId,
+        uint256 endTime,
+        uint256 headsCount,
+        uint256 tailsCount,
+        uint256 headsApple,
+        uint256 tailsApple,
+        uint256 injectedApple,
+        uint256 collectedApple
     );
 
     event CoinFlipped(
+        uint256 indexed sessionId,
         uint256 flipResult
     );
 
     event RewardClaimed(
+        address indexed player,
+        uint256 indexed sessionId,
+        uint256 amount
+    );
+
+    event RefundClaimed(
         address indexed player,
         uint256 indexed sessionId,
         uint256 amount
@@ -114,9 +154,28 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         uint256 amount
     );
 
-    constructor(address _Token, address _devWallet) {
-        Token = _Token;
-        devWallet = _devWallet;
+    event AppleBurned(
+        uint256 indexed sessionId,
+        uint256 amount
+    );
+
+    constructor(
+        address _Apple, 
+        address _RNG, 
+        address _devWallet, 
+        uint256 _defaultLength, 
+        uint256 _defaultMaxBet, 
+        uint256 _defaultMinBet, 
+        uint256 _defaultDevFee) {
+            Apple = _Apple;
+            AppleInterface = IApple(_Apple);
+            CoinFlipRNGAddress = _RNG;
+            CoinFlipRNG = ICoinFlipRNG(_RNG);
+            devWallet = _devWallet;
+            defaultLength = _defaultLength;
+            defaultMinBet = _defaultMinBet;
+            defaultMaxBet = _defaultMaxBet;
+            defaultDevFee = _defaultDevFee;
     }
 
     //---------------------------- MODIFIERS-------------------------
@@ -133,6 +192,11 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         _;
     }
 
+    modifier onlyOwnerOrOperator() {
+        require(msg.sender == owner() || Operators[msg.sender] , "Not owner or operator!");
+        _;
+    }
+
     // @dev: returns the size of the code of an address. If >0, address is a contract. 
     function _isContract(address _addr) internal view returns (bool) {
         uint256 size;
@@ -142,58 +206,91 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         return size > 0;
     }
 
-    modifier isPending(uint256 _sessionId) {
-        require(_sessions[_sessionId].status == Status.Standby, "Session is not pending!");
-        _;
-    }
-
-    modifier isOpen(uint256 _sessionId) {
-        require(_sessions[_sessionId].status == Status.Open, "Session is not open!");
-        _;
-    }
-
-    modifier isClosed(uint256 _sessionId) {
-        require(_sessions[_sessionId].status == Status.Closed, "Session is not closed!");
-        _;
-    }
-
-
-    modifier isDisbursing(uint256 _sessionId) {
-        require(_sessions[_sessionId].status == Status.Disbursing, "Session is not disbursing!");
-        _;
-    }
-
     // ------------------- Setters/Getters ------------------------
+
+    function setDefaultParams(uint256 _defaultLength, uint256 _defaultMaxBet, uint256 _defaultMinBet, uint256 _defaultDevFee) external onlyOwner {
+        require(
+        currentSessionId == 0 || 
+        _sessions[currentSessionId].status == Status.Closed || 
+        _sessions[currentSessionId].status == Status.Claimable, 
+        "The session must be closed or claimable to update values!");
+        require(_defaultLength >= minDuration && _defaultLength <= maxDuration , "Not within max/min time duration");
+        require(_defaultMinBet > 0 , "Minimum bet must be > 0");
+        require(_defaultDevFee <= maxDevFee , "Cannot exceed maxDevFee!");
+        defaultLength = _defaultLength;
+        defaultMaxBet = _defaultMaxBet;
+        defaultMinBet = _defaultMinBet;
+        defaultDevFee = _defaultDevFee;
+    }
 
     // dev: set the address of the RNG contract interface
     function setRNGAddress(address _address) external onlyOwner {
-        CoinFlipRNGAddress = (_address);
+        require(
+        currentSessionId == 0 || 
+        _sessions[currentSessionId].status == Status.Closed || 
+        _sessions[currentSessionId].status == Status.Claimable, 
+        "The session must be closed or claimable to update values!");
+        CoinFlipRNGAddress = _address;
         CoinFlipRNG = ICoinFlipRNG(_address);
     }
 
+    function setApple(address _address) external onlyOwner {
+        require(
+        currentSessionId == 0 || 
+        _sessions[currentSessionId].status == Status.Closed || 
+        _sessions[currentSessionId].status == Status.Claimable, 
+        "The session must be closed or claimable to update values!");
+        Apple = _address;
+        AppleInterface = IApple(_address);
+    }
+
     function setDevWallet(address _address) external onlyOwner {
+        require(
+        currentSessionId == 0 || 
+        _sessions[currentSessionId].status == Status.Closed || 
+        _sessions[currentSessionId].status == Status.Claimable, 
+        "The session must be closed or claimable to update values!");
         devWallet = _address;
     }
 
-    function setToken(address _Token) external onlyOwner {
-        Token = _Token;
-    }
-
     function setMaxMinDuration(uint256 _max, uint256 _min) external onlyOwner {
+        require(
+        currentSessionId == 0 || 
+        _sessions[currentSessionId].status == Status.Closed || 
+        _sessions[currentSessionId].status == Status.Claimable, 
+        "The session must be closed or claimable to update values!");
         maxDuration = _max;
         minDuration = _min;
     }
 
-    function getCurrentSessionId() external view returns (uint256) {
-        return currentSessionId;
+    function setAutoBurn(bool _bool) external onlyOwner {
+        require(
+        currentSessionId == 0 || 
+        _sessions[currentSessionId].status == Status.Closed || 
+        _sessions[currentSessionId].status == Status.Claimable, 
+        "The session must be closed or claimable to update values!");
+        autoBurnEnabled = _bool;
+    }
+
+    function setAutoSessionStart(bool _bool) external onlyOwner {
+        require(
+        currentSessionId == 0 || 
+        _sessions[currentSessionId].status == Status.Closed || 
+        _sessions[currentSessionId].status == Status.Claimable, 
+        "The session must be closed or claimable to update values!");
+        autoStartSessionEnabled = _bool;
     }
     
-    function viewSessionById(uint256 _sessionId) external view onlyOwner returns (Session memory) {
+    function viewSessionById(uint256 _sessionId) external view returns (Session memory) {
         return _sessions[_sessionId];
     }
 
-    function viewTokenBalance() external view returns (uint256) {
-        return IERC20(Token).balanceOf(address(this));
+    function getAppleBalance() external view returns (uint256) {
+        return IERC20(Apple).balanceOf(address(this));
+    }
+
+    function setOperator(address _operator, bool _bool) external onlyOwner {
+        Operators[_operator] = _bool;
     }
 
     // ------------------- Coin Flip Functions ----------------------
@@ -216,38 +313,25 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         return result;
     }
 
-    // ------------------- Bet Function ----------------------
+    // ------------------ Injection Functions --------------------
 
-    // heads = 0, tails = 1
-    function bet(uint256 _amount, uint8 _choice) external {
-        require(IERC20(Token).balanceOf(address(msg.sender)) >= _amount);
-        require(_amount >= _sessions[currentSessionId].minBet , "Must bet more than minimum amount!");
-        require(_amount <= _sessions[currentSessionId].maxBet , "Must bet less than maximum amount!");
-        require(_choice == 1 || _choice == 0, "Must choose 0 or 1!");
-        require(!HasBet[msg.sender][currentSessionId] , "You have already bet in this session!");
-        IERC20(Token).safeTransferFrom(address(msg.sender), address(this), _amount);
-        _sessions[currentSessionId].collectedToken += _amount;
+    function autoInject(uint256 _sessionId, uint256 _amount) internal {
+        IERC20(Apple).safeTransferFrom(devWallet, address(this), _amount);
+        _sessions[_sessionId].injectedApple += _amount;
+        emit AutoInjection(_sessionId, _amount);
+    }
 
-        if (_choice == 0) {
-            Bets[msg.sender][currentSessionId].player = msg.sender;
-            Bets[msg.sender][currentSessionId].amount = _amount;
-            Bets[msg.sender][currentSessionId].choice = 0;
-            _sessions[currentSessionId].headsCount++;
-        } else {
-            Bets[msg.sender][currentSessionId].player = msg.sender;
-            Bets[msg.sender][currentSessionId].amount = _amount;
-            Bets[msg.sender][currentSessionId].choice = 1;  
-            _sessions[currentSessionId].tailsCount++;
-        }
+    function injectFunds(uint256 _sessionId, uint256 _amount) external onlyOwner {
+        IERC20(Apple).safeTransferFrom(address(msg.sender), address(this), _amount);
+        _sessions[_sessionId].injectedApple += _amount;
+        emit ManualInjection(_sessionId, _amount);
+    }
 
-        HasBet[msg.sender][currentSessionId] = true;
+    // ------------------- AutoSessionFxn ---------------------
 
-        emit BetPlaced(
-            msg.sender,
-            currentSessionId,
-            _amount,
-            _choice
-        );
+    function autoStartSession() internal {
+        require(autoStartSessionEnabled , "Automatic sessions are not enabled!");
+        startSession(block.timestamp + defaultLength, defaultMinBet, defaultMaxBet, defaultDevFee);
     }
 
     // ------------------- Start Session ---------------------- 
@@ -258,14 +342,19 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         uint256 _maxBet,
         uint256 _devFee) 
         public
+        notContract()
+        onlyOwnerOrOperator()
         {
         require(
-            (currentSessionId == 0) || (_sessions[currentSessionId].status == Status.Closed),
-            "Not time to start session!"
+            (currentSessionId == 0) || 
+            (_sessions[currentSessionId].status == Status.Closed) || 
+            (_sessions[currentSessionId].status == Status.Claimable) ||
+            (_sessions[currentSessionId].status == Status.Voided),
+            "Session must be closed, claimable, or voided"
         );
 
         require(
-            ((_endTime - block.timestamp) > minDuration) && ((_endTime - block.timestamp) < maxDuration),
+            ((_endTime - block.timestamp) >= minDuration) && ((_endTime - block.timestamp) <= maxDuration),
             "Session length outside of range"
         );
 
@@ -284,9 +373,13 @@ contract CoinFlip is Ownable, ReentrancyGuard {
             maxBet: _maxBet,
             headsCount: 0,
             tailsCount: 0,
-            collectedToken: 0,
-            TokenForDisbursal: 0,
+            headsApple: 0,
+            tailsApple: 0,
+            injectedApple: 0,
+            collectedApple: 0,
+            appleForDisbursal: 0,
             totalPayouts: 0,
+            totalRefunds: 0,
             devFee: _devFee,
             flipResult: 2 // init to 2 to avoid conflict with 0 (heads) or 1 (tails). is set to 0 or 1 later depending on coin flip result.
         });
@@ -300,72 +393,135 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         );
     }
 
+    // ------------------- Bet Function ----------------------
+
+    // heads = 0, tails = 1
+    function bet(uint256 _amount, uint8 _choice) external nonReentrant notContract() notOwner() {
+        require(_sessions[currentSessionId].status == Status.Open , "Session must be open to bet!");
+        require(IERC20(Apple).balanceOf(address(msg.sender)) >= _amount , "You don't have enough Apple to place this bet!");
+        require(_amount >= _sessions[currentSessionId].minBet && _amount <= _sessions[currentSessionId].maxBet , "Bet is not within bet limits!");
+        require(_choice == 1 || _choice == 0, "Must choose 0 or 1!");
+        require(!HasBet[msg.sender][currentSessionId] , "You have already bet in this session!");
+        require(block.timestamp <= _sessions[currentSessionId].endTime, "Betting has ended!");
+        IERC20(Apple).safeTransferFrom(address(msg.sender), address(this), _amount);
+        _sessions[currentSessionId].collectedApple += _amount;
+
+        if (_choice == 0) {
+            Bets[msg.sender][currentSessionId].player = msg.sender;
+            Bets[msg.sender][currentSessionId].amount = _amount;
+            Bets[msg.sender][currentSessionId].choice = 0;
+            _sessions[currentSessionId].headsCount++;
+            _sessions[currentSessionId].headsApple += _amount;
+        } else {
+            Bets[msg.sender][currentSessionId].player = msg.sender;
+            Bets[msg.sender][currentSessionId].amount = _amount;
+            Bets[msg.sender][currentSessionId].choice = 1;  
+            _sessions[currentSessionId].tailsCount++;
+            _sessions[currentSessionId].tailsApple += _amount;
+        }
+
+        HasBet[msg.sender][currentSessionId] = true;
+
+        emit BetPlaced(
+            msg.sender,
+            currentSessionId,
+            _amount,
+            _choice
+        );
+    }
+
     // --------------------- CLOSE SESSION -----------------
 
-    function closeSession(uint256 _sessionId) external {
-      
+    function closeSession(uint256 _sessionId) external nonReentrant notContract() onlyOwnerOrOperator() {
+        require(_sessions[_sessionId].status == Status.Open , "Session must be open to close it!");
         require(block.timestamp > _sessions[_sessionId].endTime, "Lottery not over yet!");
-        generateRandomNumber();
-        _sessions[_sessionId].status = Status.Closed;
 
-        emit SessionClosed(
-            _sessionId,
-            block.timestamp,
-            _sessions[_sessionId].headsCount,
-            _sessions[_sessionId].tailsCount,
-            _sessions[_sessionId].collectedToken
-        );
+        if (_sessions[_sessionId].headsCount == 0 || _sessions[_sessionId].tailsCount == 0) {
+            _sessions[_sessionId].status = Status.Voided;
+            if (autoStartSessionEnabled) {autoStartSession();}
+            emit SessionVoided(
+                _sessionId,
+                block.timestamp,
+                _sessions[_sessionId].headsCount,
+                _sessions[_sessionId].tailsCount,
+                _sessions[_sessionId].headsApple,
+                _sessions[_sessionId].tailsApple,
+                _sessions[_sessionId].injectedApple,
+                _sessions[_sessionId].collectedApple
+            );
+        } else {
+            generateRandomNumber();
+            _sessions[_sessionId].status = Status.Closed;
+            if (autoStartSessionEnabled) {autoStartSession();}
+            emit SessionClosed(
+                _sessionId,
+                block.timestamp,
+                _sessions[_sessionId].headsCount,
+                _sessions[_sessionId].tailsCount,
+                _sessions[_sessionId].headsApple,
+                _sessions[_sessionId].tailsApple,
+                _sessions[_sessionId].injectedApple,
+                _sessions[_sessionId].collectedApple
+            );
+        }
     }
 
     // -------------------- Flip Coin & Announce Result ----------------
 
-    function flipCoinAndMakeDisbursable(uint256 _sessionId) external returns (uint256) {
-        
+    function flipCoinAndMakeClaimable(uint256 _sessionId) external nonReentrant notContract() returns (uint256) {
+        require(_sessionId <= currentSessionId , "Nonexistent session!");
+        require(_sessions[_sessionId].status == Status.Closed , "Session must be closed first!");
         uint256 sessionFlipResult = flipCoin();
-        _sessions[currentSessionId].TokenForDisbursal = (
-            ((_sessions[_sessionId].collectedToken) * (10000 - _sessions[_sessionId].devFee))) / 10000;
         _sessions[_sessionId].flipResult = sessionFlipResult;
-        uint256 amountToDevWallet = (_sessions[_sessionId].collectedToken) - (_sessions[_sessionId].TokenForDisbursal);
-        IERC20(Token).safeTransfer(devWallet, amountToDevWallet);
-        emit CoinFlipped(sessionFlipResult);
+
+        uint256 amountToDevWallet;
+
+        if (sessionFlipResult == 0) { // if heads, tails betters pay the winners
+            _sessions[_sessionId].appleForDisbursal = (
+            ((_sessions[_sessionId].tailsApple) * (10000 - _sessions[_sessionId].devFee))) / 10000;
+            amountToDevWallet = (_sessions[_sessionId].tailsApple) - (_sessions[_sessionId].appleForDisbursal);
+        } else { // if tails..
+            _sessions[_sessionId].appleForDisbursal = (
+            ((_sessions[_sessionId].headsApple) * (10000 - _sessions[_sessionId].devFee))) / 10000;
+            amountToDevWallet = (_sessions[_sessionId].headsApple) - (_sessions[_sessionId].appleForDisbursal);
+        }
+        
+        if (autoBurnEnabled) {
+            AppleInterface.burn(amountToDevWallet);
+            emit AppleBurned(_sessionId, amountToDevWallet);
+        } else {
+            IERC20(Apple).safeTransfer(devWallet, amountToDevWallet);
+        }
+        
+        _sessions[_sessionId].status = Status.Claimable;
+        emit CoinFlipped(_sessionId, sessionFlipResult);
         return sessionFlipResult;
-    }
-
-    // ------------------ Injection Functions --------------------
-
-    function autoInject(uint256 _sessionId, uint256 _amount) internal {
-        IERC20(Token).safeTransferFrom(devWallet, address(this), _amount);
-        _sessions[_sessionId].collectedToken += _amount;
-
-        emit AutoInjection(_sessionId, _amount);
-    }
-
-    function injectFunds(uint256 _sessionId, uint256 _amount) external onlyOwner {
-        IERC20(Token).safeTransferFrom(address(msg.sender), address(this), _amount);
-        _sessions[_sessionId].collectedToken += _amount;
-
-        emit ManualInjection(_sessionId, _amount);
     }
 
     // ------------------ Claim Reward Function ---------------------
 
-    function claimRewardPerSession(uint256 _sessionId) external {
-        
-        require(HasBet[msg.sender][_sessionId] , "You didn't bet in this session!");
-        require(!HasClaimed[msg.sender][_sessionId] , "Already claimed reward!");
-        require(Bets[msg.sender][_sessionId].choice == _sessions[_sessionId].flipResult , "You didn't win!");
+    function claimRewardPerSession(uint256 _sessionId) external nonReentrant notContract() notOwner() {
+        require(_sessions[_sessionId].status == Status.Claimable , "Session is not yet claimable!");
+        require(HasBet[msg.sender][_sessionId] , "You didn't bet in this session!"); // make sure they've bet
+        require(!HasClaimed[msg.sender][_sessionId] , "Already claimed reward!"); // make sure they can't claim twice
+        require(Bets[msg.sender][_sessionId].choice == _sessions[_sessionId].flipResult , "You didn't win!"); // make sure they won
 
-            uint256 playerBet = Bets[msg.sender][_sessionId].amount;
-            uint256 intHelper = 10000 - (_sessions[_sessionId].devFee);
-            uint256 adjustedBet = playerBet * intHelper;
-            uint256 intHelper2 = (adjustedBet) / 10000;
-            uint256 payout = playerBet + intHelper2;
+            uint256 playerWeight;
+            uint256 playerBet = Bets[msg.sender][_sessionId].amount; // how much a user bet
 
-            if (IERC20(Token).balanceOf(address(this)) >= payout) {
-                IERC20(Token).safeTransfer(msg.sender, payout);
+            if (_sessions[_sessionId].flipResult == 0) {
+                playerWeight = (playerBet * accuracyFactor) / (_sessions[_sessionId].headsApple); // ratio of adjusted winner bet amt. / sum of all winning heads bets
+            } else if (_sessions[_sessionId].flipResult == 1) {
+                playerWeight = (playerBet * accuracyFactor) / (_sessions[_sessionId].tailsApple); // ratio of adjusted winner bet amt. / sum of all winning tails bets
+            }
+
+            uint256 payout = ((playerWeight * (_sessions[_sessionId].appleForDisbursal)) / accuracyFactor) + playerBet;
+
+            if (IERC20(Apple).balanceOf(address(this)) >= payout) {
+                IERC20(Apple).safeTransfer(msg.sender, payout);
             } else {
                 autoInject(_sessionId, payout);
-                IERC20(Token).safeTransfer(msg.sender, payout);
+                IERC20(Apple).safeTransfer(msg.sender, payout);
             }
             
             _sessions[_sessionId].totalPayouts += payout;
@@ -373,5 +529,54 @@ contract CoinFlip is Ownable, ReentrancyGuard {
             TotalRewards[msg.sender] += payout;
             HasClaimed[msg.sender][_sessionId] = true;
             emit RewardClaimed(msg.sender, _sessionId, payout);   
+    }
+
+    // ------------------ Refund Fxn for Voided Sessions ----------------
+
+    // sessions are voided if there isn't at least one tails bet and one heads bet. In this case, betters receive full refunds
+    function claimRefundForVoidedSession(uint256 _sessionId) external nonReentrant notContract() notOwner() {
+        require(_sessions[_sessionId].status == Status.Voided , "This session is not voided");
+        require(HasBet[msg.sender][_sessionId] , "You didn't bet in this session!");
+        require(PlayerRewardPerSession[msg.sender][_sessionId] == 0 && !HasBeenRefunded[msg.sender][_sessionId], "Already claimed reward or refund!"); 
+
+            uint256 refundAmount = Bets[msg.sender][_sessionId].amount;
+        
+            if (IERC20(Apple).balanceOf(address(this)) >= refundAmount) {
+                IERC20(Apple).safeTransfer(msg.sender, refundAmount);
+            } else {
+                autoInject(_sessionId, refundAmount);
+                IERC20(Apple).safeTransfer(msg.sender, refundAmount);
+            }
+
+        HasBeenRefunded[msg.sender][_sessionId] = true;
+        PlayerRefundPerSession[msg.sender][_sessionId] += refundAmount;
+        _sessions[_sessionId].totalRefunds += refundAmount;
+        emit RefundClaimed(msg.sender, _sessionId, refundAmount); 
+
+    }
+
+    // ------------------ Read Fxn to Calculate Payout ------------------
+
+    function calculatePayout(address _address, uint256 _sessionId) external view returns (uint256) {
+        uint256 calculatedPayout;
+
+        if (_sessions[_sessionId].status != Status.Claimable ||
+            !HasBet[_address][_sessionId] ||
+            Bets[_address][_sessionId].choice != _sessions[_sessionId].flipResult) {
+            calculatedPayout = 0; 
+            return calculatedPayout;
+        } else {
+            uint256 playerWeight;
+            uint256 playerBet = Bets[_address][_sessionId].amount; // how much a user bet
+
+            if (_sessions[_sessionId].flipResult == 0) {
+                playerWeight = (playerBet * accuracyFactor) / (_sessions[_sessionId].headsApple); // ratio of adjusted winner bet amt. / sum of all winning heads bets
+            } else if (_sessions[_sessionId].flipResult == 1) {
+                playerWeight = (playerBet * accuracyFactor) / (_sessions[_sessionId].tailsApple); // ratio of adjusted winner bet amt. / sum of all winning tails bets
+            }
+
+            uint256 payout = ((playerWeight * (_sessions[_sessionId].appleForDisbursal)) / accuracyFactor) + playerBet;
+            return payout;
+        }
     }
 }
