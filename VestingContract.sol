@@ -6,7 +6,8 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
-// A Token vesting contract that distributes tokens over a cliff period. This contract is live on Mainnet @ 0x84068AA1A904Ff5403EFC980e8a8342568eD2844
+// A Token vesting contract that distributes tokens over a cliff period. This contract is live on Mainnet
+// @ https://etherscan.io/address/0x84068aa1a904ff5403efc980e8a8342568ed2844
 
 contract PyeClaim is Ownable, ReentrancyGuard {
 
