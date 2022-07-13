@@ -1,56 +1,58 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-/*********
-A smart contract developed from scratch that grants users the ability to withdraw 10% of their alloted token balance every week. Two other tokens,
-denoted as "Token1" and "Token2" are reward tokens that are also distributed propotionally based on a user's weighted balance. Wait times here are arbitrary
-and adjustable as needed.
-*********/
-
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
-contract VestingContract is Ownable, ReentrancyGuard {
+// A Token vesting contract that distributes tokens over a cliff period. This contract is live on Mainnet @ 0x84068AA1A904Ff5403EFC980e8a8342568eD2844
+
+contract PyeClaim is Ownable, ReentrancyGuard {
 
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
     
     struct Allotment {
-        uint256 allotedToken0;
-        uint256 claimedToken0;
-        uint256 claimedToken1;
-        uint256 claimedToken2;
+        uint256 allotedPYE;
+        uint256 claimedPYE;
+        uint256 claimedApple;
+        uint256 claimedCherry;
     }
 
     mapping(address => Allotment) public Allotments;
 
-    address public Token0;
-    address public Token2;
-    address public Token1;
+    uint256 private claimDateIndex = 0; // multiplicative factor for each daily slice of Apl/Cher, representing each day since claimStartDate.
+    uint256 private constant minIndex = 0;
+    uint256 private constant maxIndex = 64; // capped at 64 days of Apl/Cher withdrawls 
+    uint256 public constant claimStartDate =  1655924400;  // This is exactly 30 days after startTime, when withdrawals are now possible.
+    uint256 private claimDate = 1656010800; // claimStartDate + 1 day, updates regularly and keeps track of first daily withdrawl, requires 24hrs for increment 
+    
+    address public PYE;
+    address public Cherry;
+    address public Apple;
 
     uint256 public immutable startTime; // beginning of 30 day vesting window (unix timestamp)
-    uint256 public immutable totalAllotments; // sum of every holder's Allotment.total (Token0 tokens)
-    uint256 public claimableToken1;
-    uint256 public claimableToken2;
+    uint256 public immutable totalAllotments; // sum of every holder's Allotment.total (PYE tokens)
+    uint256 public claimableApple;
+    uint256 public claimableCherry;
     uint256 constant accuracyFactor = 1 * 10**18;
     
-    event TokensClaimed(address _holder, uint256 _amountToken0, uint256 _amountToken1, uint256 _amountToken2);
-    event Token0Funded(address _depositor, uint256 _amount, uint256 _timestamp);
-    event Token1Funded(address _depositor, uint256 _amount, uint256 _timestamp);
-    event Token2Funded(address _depositor, uint256 _amount, uint256 _timestamp);
-    event Token0Removed(address _withdrawer, uint256 _amount, uint256 _timestamp);
-    event Token1Removed(address _withdrawer,uint256 _amount, uint256 _timestamp);
-    event Token2Removed(address _withdrawer, uint256 _amount, uint256 _timestamp);
+    event TokensClaimed(address _holder, uint256 _amountPYE, uint256 _amountApple, uint256 _amountCherry);
+    event PYEFunded(address _depositor, uint256 _amount, uint256 _timestamp);
+    event AppleFunded(address _depositor, uint256 _amount, uint256 _timestamp);
+    event CherryFunded(address _depositor, uint256 _amount, uint256 _timestamp);
+    event PYERemoved(address _withdrawer, uint256 _amount, uint256 _timestamp);
+    event AppleRemoved(address _withdrawer,uint256 _amount, uint256 _timestamp);
+    event CherryRemoved(address _withdrawer, uint256 _amount, uint256 _timestamp);
 
    
-    constructor(address _Token0, address _Token1, address _Token2) {
-        startTime = block.timestamp;
-        Token0 = _Token0;
-        Token1 = _Token1;
-        Token2 = _Token2;
-        totalAllotments = 10000000000000000000000;
+    constructor(uint256 _startTime) {
+        startTime = _startTime; //1653332400 for 24 May 2022 @ 12:00:00 PM UTC
+        PYE = 0x5B232991854c790b29d3F7a145a7EFD660c9896c;
+        Apple = 0x6f43a672D8024ba624651a5c2e63D129783dAd1F;
+        Cherry = 0xD2858A1f93316242E81CF69B762361F59Fb9b18E;
+        totalAllotments = (4 * 10**9) * 10**9; // 4 billion PYE tokens
     }
 
     // @dev: disallows contracts from entering
@@ -62,165 +64,206 @@ contract VestingContract is Ownable, ReentrancyGuard {
 
     // ------------------ Getter Fxns ----------------------
 
-    function getToken0Allotment(address _address) public view returns (uint256) {
-        return Allotments[_address].allotedToken0;
+    function getPYEAllotment(address _address) public view returns (uint256) {
+        return Allotments[_address].allotedPYE;
+    }
+
+    function getAPPLEAllotment(address _address) public view returns (uint256) {
+        uint256 original = Allotments[_address].allotedPYE; // initial allotment
+        uint256 weightedAllotment = (original.mul(accuracyFactor)).div(totalAllotments);
+        uint256 allottedApple = ((weightedAllotment.mul(claimableApple)).div(accuracyFactor));
+
+        return allottedApple;
+    }
+
+    function getCHERRYAllotment(address _address) public view returns (uint256) {
+        uint256 original = Allotments[_address].allotedPYE; // initial allotment
+        uint256 weightedAllotment = (original.mul(accuracyFactor)).div(totalAllotments);
+        uint256 allottedCherry = ((weightedAllotment.mul(claimableCherry)).div(accuracyFactor));
+
+        return allottedCherry;
     }
 
     function getClaimed(address _address) public view returns (uint256, uint256, uint256) {
         return 
-            (Allotments[_address].claimedToken0,
-             Allotments[_address].claimedToken1,
-             Allotments[_address].claimedToken2);
+            (Allotments[_address].claimedPYE,
+             Allotments[_address].claimedApple,
+             Allotments[_address].claimedCherry);
     }
 
     function getElapsedTime() public view returns (uint256) {
         return block.timestamp.sub(startTime);
     }
 
-    function getContractToken1() public view returns (uint256) {
-        return IERC20(Token1).balanceOf(address(this));
+    function getContractApple() public view returns (uint256) {
+        return IERC20(Apple).balanceOf(address(this));
     }
 
-    function getContractToken2() public view returns (uint256) {
-        return IERC20(Token2).balanceOf(address(this));
+    function getContractCherry() public view returns (uint256) {
+        return IERC20(Cherry).balanceOf(address(this));
+    }
+
+    function getClaimDateIndex() public view returns (uint256) {
+        return claimDateIndex;
     }
 
     // ----------------- Setter Fxns -----------------------
 
-    function setToken0(address _Token0) public onlyOwner {Token0 = _Token0;}
+    function setPYE(address _PYE) public onlyOwner {PYE = _PYE;}
 
-    function setToken1(address _Token1) public onlyOwner {Token1 = _Token1;}
+    function setApple(address _Apple) public onlyOwner {Apple = _Apple;}
 
-    function setToken2(address _Token2) public onlyOwner {Token2 = _Token2;}
+    function setCherry(address _Cherry) public onlyOwner {Cherry = _Cherry;}
 
     function setAllotment(address _address, uint256 _allotment) public onlyOwner {
-        Allotments[_address].allotedToken0 = _allotment;
+        Allotments[_address].allotedPYE = _allotment;
+    }
+
+    function setBatchAllotment(address[] calldata _holders, uint256[] calldata _allotments) external onlyOwner {
+        for (uint256 i = 0; i < _holders.length; i++) {
+            Allotments[_holders[i]].allotedPYE = _allotments[i];
+        }
+    }
+
+    function updateIndex() external {
+        require(block.timestamp > claimDate && claimDateIndex <= maxIndex && claimDateIndex >= minIndex); {
+            claimDateIndex = block.timestamp.sub(claimStartDate).div(86400);
+            if (claimDateIndex > maxIndex) {claimDateIndex = maxIndex;}
+            claimDate += 1 days;
+        }
     }
 
     // ----------------- Contract Funding/Removal Fxns -------------
 
-    function fundToken0(uint256 _amountToken0) external onlyOwner {
-        IERC20(Token0).transferFrom(address(msg.sender), address(this), _amountToken0);
-        emit Token0Funded(msg.sender, _amountToken0, block.timestamp);
+    function fundPYE(uint256 _amountPYE) external onlyOwner {
+        IERC20(PYE).transferFrom(address(msg.sender), address(this), _amountPYE);
+        emit PYEFunded(msg.sender, _amountPYE, block.timestamp);
     }
 
-    function fundToken1(uint256 _amountToken1) external onlyOwner {
-        IERC20(Token1).transferFrom(address(msg.sender), address(this), _amountToken1);
-        claimableToken1 = claimableToken1.add(_amountToken1);
-        emit Token1Funded(msg.sender, _amountToken1, block.timestamp);
+    function fundApple(uint256 _amountApple) external onlyOwner {
+        IERC20(Apple).transferFrom(address(msg.sender), address(this), _amountApple);
+        claimableApple = claimableApple.add(_amountApple);
+        emit AppleFunded(msg.sender, _amountApple, block.timestamp);
     }
 
-    function fundToken2(uint256 _amountToken2) external onlyOwner {
-        IERC20(Token2).transferFrom(address(msg.sender), address(this), _amountToken2);
-        claimableToken2 = claimableToken2.add(_amountToken2);
-        emit Token2Funded(msg.sender, _amountToken2, block.timestamp);
+    function fundCherry(uint256 _amountCherry) external onlyOwner {
+        IERC20(Cherry).transferFrom(address(msg.sender), address(this), _amountCherry);
+        claimableCherry = claimableCherry.add(_amountCherry);
+        emit CherryFunded(msg.sender, _amountCherry, block.timestamp);
     }
 
-    function removeToken0(uint256 _amountToken0) external onlyOwner {
-        require(getElapsedTime() < 30 days || getElapsedTime() > 180 days , "Cannot withdraw Token0 during the vesting period!");
-        require(_amountToken0 <= IERC20(Token0).balanceOf(address(this)), "Amount exceeds contract Token0 balance!");
-        IERC20(Token0).transfer(address(msg.sender), _amountToken0);
-        emit Token0Removed(msg.sender, _amountToken0, block.timestamp);
+    function removePYE(uint256 _amountPYE) external onlyOwner {
+        require(getElapsedTime() < 30 days || getElapsedTime() > 180 days , "Cannot withdraw PYE during the vesting period!");
+        require(_amountPYE <= IERC20(PYE).balanceOf(address(this)), "Amount exceeds contract PYE balance!");
+        IERC20(PYE).transfer(address(msg.sender), _amountPYE);
+        emit PYERemoved(msg.sender, _amountPYE, block.timestamp);
     }
 
-    function removeToken1(uint256 _amountToken1) external onlyOwner {
-        require(getElapsedTime() > 180 days , "Can only remove Token1 after vesting period!");
-        require(_amountToken1 <= IERC20(Token1).balanceOf(address(this)), "Amount exceeds contract Token1 balance!");
-        IERC20(Token1).transfer(address(msg.sender), _amountToken1);
-        claimableToken1 = claimableToken1.sub(_amountToken1);
-        emit Token1Removed(msg.sender, _amountToken1, block.timestamp);
+    function removeApple(uint256 _amountApple) external onlyOwner {
+        require(getElapsedTime() > 180 days , "Can only remove apple after vesting period!");
+        require(_amountApple <= IERC20(Apple).balanceOf(address(this)), "Amount exceeds contract Apple balance!");
+        IERC20(Apple).transfer(address(msg.sender), _amountApple);
+        claimableApple = claimableApple.sub(_amountApple);
+        emit AppleRemoved(msg.sender, _amountApple, block.timestamp);
     }
 
-    function removeToken2(uint256 _amountToken2) external onlyOwner {
-        require(getElapsedTime() > 180 days , "Can only remove Token2 after vesting period!");
-        require(_amountToken2 <= IERC20(Token2).balanceOf(address(this)), "Amount exceeds contract Token2 balance!");
-        IERC20(Token2).transfer(address(msg.sender), _amountToken2);
-        claimableToken2 = claimableToken2.sub(_amountToken2);
-        emit Token2Removed(msg.sender, _amountToken2, block.timestamp);
+    function removeCherry(uint256 _amountCherry) external onlyOwner {
+        require(getElapsedTime() > 180 days , "Can only remove cherry after vesting period!");
+        require(_amountCherry <= IERC20(Cherry).balanceOf(address(this)), "Amount exceeds contract Cherry balance!");
+        IERC20(Cherry).transfer(address(msg.sender), _amountCherry);
+        claimableCherry = claimableCherry.sub(_amountCherry);
+        emit CherryRemoved(msg.sender, _amountCherry, block.timestamp);
     }
 
     // ----------------- Withdraw Fxn ----------------------
 
     function claimTokens() external nonReentrant notContract() {
-        require(getElapsedTime() > 10 days , "You have not waited the 10-day cliff period!");
-        uint256 original = Allotments[msg.sender].allotedToken0; // initial allotment
-        uint256 withdrawn = Allotments[msg.sender].claimedToken0; // amount user has claimed
+        require(getElapsedTime() > 30 days , "You have not waited the 30-day cliff period!");
+        if(block.timestamp > claimDate && claimDateIndex <= maxIndex && claimDateIndex >= minIndex) {
+            claimDateIndex = block.timestamp.sub(claimStartDate).div(86400);
+            if (claimDateIndex > maxIndex) {claimDateIndex = maxIndex;}
+            claimDate += 1 days;
+        }
+        uint256 original = Allotments[msg.sender].allotedPYE; // initial allotment
+        uint256 withdrawn = Allotments[msg.sender].claimedPYE; // amount user has claimed
         uint256 available = original.sub(withdrawn); // amount left that can be claimed
         uint256 tenPercent = (original.mul((1 * 10**18))).div(10 * 10**18); // 10% of user's original allotment;
+        uint256 dailyApple = (claimableApple.mul(15625 * 10**18)).div(1 * 10**6);
+        uint256 dailyCherry = (claimableCherry.mul(15625 * 10**18)).div(1 * 10**6);
 
         uint256 weightedAllotment = (original.mul(accuracyFactor)).div(totalAllotments);
-        uint256 withdrawableToken1 = ((weightedAllotment.mul(claimableToken1)).div(accuracyFactor)).sub(Allotments[msg.sender].claimedToken1);
-        uint256 withdrawableToken2 = ((weightedAllotment.mul(claimableToken2)).div(accuracyFactor)).sub(Allotments[msg.sender].claimedToken2);
+        uint256 withdrawableApple = ((weightedAllotment.mul(dailyApple).div(1 * 10**18)).mul(claimDateIndex).div(accuracyFactor)).sub(Allotments[msg.sender].claimedApple);
+        uint256 withdrawableCherry = ((weightedAllotment.mul(dailyCherry).div(1 * 10**18)).mul(claimDateIndex).div(accuracyFactor)).sub(Allotments[msg.sender].claimedCherry);
 
-        uint256 withdrawableToken0;
+        uint256 withdrawablePYE;
 
-        if (getElapsedTime() >= 19 days) {
-            withdrawableToken0 = available;
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        if (getElapsedTime() >= 93 days) {
+            withdrawablePYE = available;
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 18 days && getElapsedTime() < 19 days) {
-            withdrawableToken0 = (9 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 86 days && getElapsedTime() < 93 days) {
+            withdrawablePYE = (9 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 17 days && getElapsedTime() < 18 days) {
-            withdrawableToken0 = (8 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 79 days && getElapsedTime() < 86 days) {
+            withdrawablePYE = (8 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 16 days && getElapsedTime() < 17 days) {
-            withdrawableToken0 = (7 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 72 days && getElapsedTime() < 79 days) {
+            withdrawablePYE = (7 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 15 days && getElapsedTime() < 16 days) {
-            withdrawableToken0 = (6 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 65 days && getElapsedTime() < 72 days) {
+            withdrawablePYE = (6 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 14 days && getElapsedTime() < 15 days) {
-            withdrawableToken0 = (5 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 58 days && getElapsedTime() < 65 days) {
+            withdrawablePYE = (5 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 13 days && getElapsedTime() < 14 days) {
-            withdrawableToken0 = (4 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 51 days && getElapsedTime() < 58 days) {
+            withdrawablePYE = (4 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 12 days && getElapsedTime() < 13 days) {
-            withdrawableToken0 = (3 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 44 days && getElapsedTime() < 51 days) {
+            withdrawablePYE = (3 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 11 days && getElapsedTime() < 12 days) {
-            withdrawableToken0 = (2 * tenPercent).sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 37 days && getElapsedTime() < 44 days) {
+            withdrawablePYE = (2 * tenPercent).sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
-        } else if (getElapsedTime() >= 10 days && getElapsedTime() < 11 days) {
-            withdrawableToken0 = tenPercent.sub(withdrawn);
-            checkThenTransfer(withdrawableToken0, withdrawableToken1, withdrawableToken2, available);
+        } else if (getElapsedTime() >= 30 days && getElapsedTime() < 37 days) {
+            withdrawablePYE = tenPercent.sub(withdrawn);
+            checkThenTransfer(withdrawablePYE, withdrawableApple, withdrawableCherry, available);
 
         } else {
-            withdrawableToken0 = 0;
+            withdrawablePYE = 0;
         }
     }
 
     // ------------------------ Internal Helper/Transfer Fxns ------
 
-    function checkThenTransfer(uint256 _withdrawableToken0, uint256 _withdrawableToken1, uint256 _withdrawableToken2, uint256 _available) internal {
-        require(_withdrawableToken0 <= _available && _withdrawableToken0 <= IERC20(Token0).balanceOf(address(this)) , 
-            "You have already claimed for this period, or you have claimed your total Token0 allotment!");
-        require(_withdrawableToken1 <= getContractToken1() && _withdrawableToken2 <= getContractToken2() ,
-            "Token2 or Token1 transfer exceeds contract balance!");
+    function checkThenTransfer(uint256 _withdrawablePYE, uint256 _withdrawableApple, uint256 _withdrawableCherry, uint256 _available) internal {
+        require(_withdrawablePYE <= _available && _withdrawablePYE <= IERC20(PYE).balanceOf(address(this)) , 
+            "You have already claimed for this period, or you have claimed your total PYE allotment!");
+        require(_withdrawableApple <= getContractApple() && _withdrawableCherry <= getContractCherry() ,
+            "Cherry or Apple transfer exceeds contract balance!");
 
-        if (_withdrawableToken0 > 0) {
-            IERC20(Token0).safeTransfer(msg.sender, _withdrawableToken0);
-            Allotments[msg.sender].claimedToken0 = Allotments[msg.sender].claimedToken0.add(_withdrawableToken0);
+        if (_withdrawablePYE > 0) {
+            IERC20(PYE).safeTransfer(msg.sender, _withdrawablePYE);
+            Allotments[msg.sender].claimedPYE = Allotments[msg.sender].claimedPYE.add(_withdrawablePYE);
         }
-        if (_withdrawableToken1 > 0) {
-            IERC20(Token1).safeTransfer(msg.sender, _withdrawableToken1);
-            Allotments[msg.sender].claimedToken1 = Allotments[msg.sender].claimedToken1.add(_withdrawableToken1);
+        if (_withdrawableApple > 0) {
+            IERC20(Apple).safeTransfer(msg.sender, _withdrawableApple);
+            Allotments[msg.sender].claimedApple = Allotments[msg.sender].claimedApple.add(_withdrawableApple);
         }
-        if (_withdrawableToken2 > 0) {
-            IERC20(Token2).safeTransfer(msg.sender, _withdrawableToken2);
-            Allotments[msg.sender].claimedToken2 = Allotments[msg.sender].claimedToken2.add(_withdrawableToken2);
+        if (_withdrawableCherry > 0) {
+            IERC20(Cherry).safeTransfer(msg.sender, _withdrawableCherry);
+            Allotments[msg.sender].claimedCherry = Allotments[msg.sender].claimedCherry.add(_withdrawableCherry);
         }
 
-        emit TokensClaimed(msg.sender, _withdrawableToken0, _withdrawableToken1, _withdrawableToken2);
+        emit TokensClaimed(msg.sender, _withdrawablePYE, _withdrawableApple, _withdrawableCherry);
     }
 
     function _isContract(address _addr) internal view returns (bool) {
@@ -234,30 +277,32 @@ contract VestingContract is Ownable, ReentrancyGuard {
     // ----------------------- View Function To Calculate Withdraw Amt. -----
 
     function calculateWithdrawableAmounts(address _address) external view returns (uint256, uint256, uint256) {
-        require(getElapsedTime() > 10 days , "You have not waited the 10-day cliff period! Your withdrawable amounts are 0.");
-        uint256 original = Allotments[_address].allotedToken0; // initial allotment
-        uint256 withdrawn = Allotments[_address].claimedToken0; // amount user has claimed
+        
+        uint256 original = Allotments[_address].allotedPYE; // initial allotment
+        uint256 withdrawn = Allotments[_address].claimedPYE; // amount user has claimed
         uint256 available = original.sub(withdrawn); // amount left that can be claimed
         uint256 tenPercent = (original.mul((1 * 10**18))).div(10 * 10**18); // 10% of user's original allotment;
+        uint256 dailyApple = (claimableApple.mul(15625 * 10**18)).div(1 * 10**6);
+        uint256 dailyCherry = (claimableCherry.mul(15625 * 10**18)).div(1 * 10**6);
 
         uint256 weightedAllotment = (original.mul(accuracyFactor)).div(totalAllotments);
-        uint256 withdrawableToken1 = ((weightedAllotment.mul(claimableToken1)).div(accuracyFactor)).sub(Allotments[_address].claimedToken1);
-        uint256 withdrawableToken2 = ((weightedAllotment.mul(claimableToken2)).div(accuracyFactor)).sub(Allotments[_address].claimedToken2);
+        uint256 withdrawableApple = ((weightedAllotment.mul(dailyApple).div(1 * 10**18)).mul(getClaimDateIndex()).div(accuracyFactor)).sub(Allotments[_address].claimedApple);
+        uint256 withdrawableCherry = ((weightedAllotment.mul(dailyCherry).div(1 * 10**18)).mul(getClaimDateIndex()).div(accuracyFactor)).sub(Allotments[_address].claimedCherry);
 
-        uint256 withdrawableToken0;
+        uint256 withdrawablePYE;
 
-        if (getElapsedTime() >= 19 days) {withdrawableToken0 = available;
-        } else if (getElapsedTime() >= 18 days && getElapsedTime() < 19 days) {withdrawableToken0 = (9 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 17 days && getElapsedTime() < 18 days) {withdrawableToken0 = (8 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 16 days && getElapsedTime() < 17 days) {withdrawableToken0 = (7 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 15 days && getElapsedTime() < 16 days) {withdrawableToken0 = (6 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 14 days && getElapsedTime() < 15 days) {withdrawableToken0 = (5 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 13 days && getElapsedTime() < 14 days) {withdrawableToken0 = (4 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 12 days && getElapsedTime() < 13 days) {withdrawableToken0 = (3 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 11 days && getElapsedTime() < 12 days) {withdrawableToken0 = (2 * tenPercent).sub(withdrawn);
-        } else if (getElapsedTime() >= 10 days && getElapsedTime() < 11 days) {withdrawableToken0 = tenPercent.sub(withdrawn);
-        } else {withdrawableToken0 = 0;}
+        if (getElapsedTime() >= 93 days) {withdrawablePYE = available;
+        } else if (getElapsedTime() >= 86 days && getElapsedTime() < 93 days) {withdrawablePYE = (9 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 79 days && getElapsedTime() < 86 days) {withdrawablePYE = (8 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 72 days && getElapsedTime() < 79 days) {withdrawablePYE = (7 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 65 days && getElapsedTime() < 72 days) {withdrawablePYE = (6 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 58 days && getElapsedTime() < 65 days) {withdrawablePYE = (5 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 51 days && getElapsedTime() < 58 days) {withdrawablePYE = (4 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 44 days && getElapsedTime() < 51 days) {withdrawablePYE = (3 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 37 days && getElapsedTime() < 44 days) {withdrawablePYE = (2 * tenPercent).sub(withdrawn);
+        } else if (getElapsedTime() >= 30 days && getElapsedTime() < 37 days) {withdrawablePYE = tenPercent.sub(withdrawn);
+        } else {withdrawablePYE = 0;}
 
-        return (withdrawableToken0, withdrawableToken1, withdrawableToken2);
+        return (withdrawablePYE, withdrawableApple, withdrawableCherry);
     }    
 }
