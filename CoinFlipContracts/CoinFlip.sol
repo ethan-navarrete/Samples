@@ -7,8 +7,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/ICoinFlipRNG.sol";
 import "./interfaces/IApple.sol";
 
-// contract that allows users to bet on a coin flip. RNG contract must be deployed first.
-// uses VRFv2 Oracle
+// contract that allows users to bet on a coin flip. RNG contract must be deployed first. 
 
 contract CoinFlip is Ownable, ReentrancyGuard {
 
@@ -30,9 +29,11 @@ contract CoinFlip is Ownable, ReentrancyGuard {
     mapping(address => mapping(uint256 => bool)) public HasBeenRefunded; // keeps track of whether or not a user has been refunded for a particular session
     mapping(address => mapping(uint256 => uint256)) public PlayerRewardPerSession; // keeps track of player rewards per session
     mapping(address => mapping(uint256 => uint256)) public PlayerRefundPerSession; // keeps track of player refunds per session
-    mapping(address => uint256) public TotalRewards;
-    mapping(uint256 => Session) private _sessions;
+    mapping(address => uint256) public TotalRewards; // a user's total collected payouts (lifetime)
+    mapping(uint256 => Session) public _sessions; // mapping for session id to unlock corresponding session params
     mapping(address => bool) public Operators; // contract operators 
+    mapping(address => uint256[]) public EnteredSessions; // list of session ID's that a particular address has bet in
+   
 
     //----- Lottery State Variables ---------------
 
@@ -293,6 +294,22 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         Operators[_operator] = _bool;
     }
 
+    function getEnteredSessionsLength(address _better) external view returns (uint256) {
+        return EnteredSessions[_better].length;
+    }
+
+    function getBetHistory(address _better, uint256 _sessionId) external view returns 
+    (uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256) {
+        return (Bets[_better][_sessionId].amount, 
+                Bets[_better][_sessionId].choice,
+                _sessions[_sessionId].startTime,
+                _sessions[_sessionId].endTime,
+                _sessions[_sessionId].headsApple,
+                _sessions[_sessionId].tailsApple,
+                _sessions[_sessionId].devFee,
+                _sessions[_sessionId].flipResult);
+    }
+
     // ------------------- Coin Flip Functions ----------------------
 
     // @dev: generates a random number in the VRF contract. must be called before flipCoin() 
@@ -342,13 +359,11 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         uint256 _maxBet,
         uint256 _devFee) 
         public
-        notContract()
         onlyOwnerOrOperator()
         {
         require(
             (currentSessionId == 0) || 
-            (_sessions[currentSessionId].status == Status.Closed) || 
-            (_sessions[currentSessionId].status == Status.Claimable) ||
+            (_sessions[currentSessionId].status == Status.Claimable) || 
             (_sessions[currentSessionId].status == Status.Voided),
             "Session must be closed, claimable, or voided"
         );
@@ -421,6 +436,7 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         }
 
         HasBet[msg.sender][currentSessionId] = true;
+        EnteredSessions[msg.sender].push(currentSessionId);
 
         emit BetPlaced(
             msg.sender,
@@ -432,7 +448,7 @@ contract CoinFlip is Ownable, ReentrancyGuard {
 
     // --------------------- CLOSE SESSION -----------------
 
-    function closeSession(uint256 _sessionId) external nonReentrant notContract() onlyOwnerOrOperator() {
+    function closeSession(uint256 _sessionId) external nonReentrant onlyOwnerOrOperator() {
         require(_sessions[_sessionId].status == Status.Open , "Session must be open to close it!");
         require(block.timestamp > _sessions[_sessionId].endTime, "Lottery not over yet!");
 
@@ -452,7 +468,6 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         } else {
             generateRandomNumber();
             _sessions[_sessionId].status = Status.Closed;
-            if (autoStartSessionEnabled) {autoStartSession();}
             emit SessionClosed(
                 _sessionId,
                 block.timestamp,
@@ -468,7 +483,7 @@ contract CoinFlip is Ownable, ReentrancyGuard {
 
     // -------------------- Flip Coin & Announce Result ----------------
 
-    function flipCoinAndMakeClaimable(uint256 _sessionId) external nonReentrant notContract() returns (uint256) {
+    function flipCoinAndMakeClaimable(uint256 _sessionId) external nonReentrant onlyOwnerOrOperator returns (uint256) {
         require(_sessionId <= currentSessionId , "Nonexistent session!");
         require(_sessions[_sessionId].status == Status.Closed , "Session must be closed first!");
         uint256 sessionFlipResult = flipCoin();
@@ -495,6 +510,7 @@ contract CoinFlip is Ownable, ReentrancyGuard {
         
         _sessions[_sessionId].status = Status.Claimable;
         emit CoinFlipped(_sessionId, sessionFlipResult);
+        if (autoStartSessionEnabled) {autoStartSession();}
         return sessionFlipResult;
     }
 
