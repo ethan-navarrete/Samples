@@ -1,26 +1,17 @@
-{\rtf1\ansi\ansicpg1252\cocoartf2580
-\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fmodern\fcharset0 Courier;}
-{\colortbl;\red255\green255\blue255;\red255\green255\blue255;}
-{\*\expandedcolortbl;;\cssrgb\c100000\c100000\c100000;}
-\margl1440\margr1440\vieww11520\viewh8400\viewkind0
-\deftab720
-\pard\pardeftab720\partightenfactor0
+// SPDX-License-Identifier: MIT LICENSE\
+pragma solidity ^0.8.15;
 
-\f0\fs24 \cf2 \expnd0\expndtw0\kerning0
-\outl0\strokewidth0 \strokec2 // SPDX-License-Identifier: MIT LICENSE\
-pragma solidity ^0.8.15;\
-\
 // contract where staked matador nfts are stored\
 import "@openzeppelin/contracts/access/Ownable.sol";\
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";\
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";\
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";\
 import "./interfaces/IGenesis.sol";\
-\
+
 contract Arena is Ownable, IERC721Receiver \{\
-    \
+    
     using EnumerableSet for EnumerableSet.UintSet;\
-\
+
     constructor() \{\
         Genesis = 0x881935AC212d66C6C35317A93d39840bAbF67CF3;\
         GenesisInterface = IGenesis(0x881935AC212d66C6C35317A93d39840bAbF67CF3);\
