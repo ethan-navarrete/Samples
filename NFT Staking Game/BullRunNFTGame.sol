@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT LICENSE
 pragma solidity 0.8.16;
 
+// LIVE ON ETH MAINNET @ 0x801aaeCAA1059ee87c646cad709e210AE1930e41
+// BULLPEN IS LIVE @ 0x9c215c9Ab78b544345047b9aB604c9c9AC391100
+// ARENA IS LIVE @ 0xF84BD9d391c9d4874032809BE3Fd121103de5F60
+
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
