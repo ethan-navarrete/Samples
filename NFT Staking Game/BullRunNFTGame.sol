@@ -20,18 +20,18 @@ import "./interfaces/IHub.sol";
 contract BullRun is IERC721Receiver, Ownable, ReentrancyGuard {
     using EnumerableSet for EnumerableSet.UintSet;
 
-    address payable public RandomizerContract; // VRF contract to decide nft stealing
-    address public BullpenContract; // stores staked Bulls
-    address public ArenaContract; // stores staked Matadors
-    IERC721 public Genesis; // Genesis NFT contract
-    IERC721 public Alpha; // Alpha NFT contract
+    address payable public RandomizerContract = payable(0xF9439027c8A21E1375CCDFf31c46ca21f8603305); // VRF contract to decide nft stealing
+    address public BullpenContract = 0x9c215c9Ab78b544345047b9aB604c9c9AC391100; // stores staked Bulls
+    address public ArenaContract = 0xF84BD9d391c9d4874032809BE3Fd121103de5F60; // stores staked Matadors
+    IERC721 public Genesis = IERC721(0x810FeDb4a6927D02A6427f7441F6110d7A1096d5); // Genesis NFT contract
+    IERC721 public Alpha = IERC721(0x96Af517c414B3726c1B2Ecc744ebf9d292DCbF60); // Alpha NFT contract
 
-    IMetatopiaCoinFlipRNG private MetatopiaCoinFlipRNGInterface;
-    ITopia private TopiaInterface;
-    IBullpen private BullpenInterface;
-    IArena private ArenaInterface;
-    IRandomizer private RandomizerInterface;
-    IHub public HubInterface;
+    IMetatopiaCoinFlipRNG private MetatopiaCoinFlipRNGInterface = IMetatopiaCoinFlipRNG(0xfe68e3F51F9c79569eB3679B750e617b423852F9);
+    ITopia private TopiaInterface = ITopia(0x41473032b82a4205DDDe155CC7ED210B000b014D);
+    IBullpen private BullpenInterface = IBullpen(0x9c215c9Ab78b544345047b9aB604c9c9AC391100);
+    IArena private ArenaInterface = IArena(0xF84BD9d391c9d4874032809BE3Fd121103de5F60);
+    IRandomizer private RandomizerInterface = IRandomizer(0xF9439027c8A21E1375CCDFf31c46ca21f8603305);
+    IHub public HubInterface = IHub(0x69fdE1A7d6837cD7E82B0BbedcbAd40F487Fdb05);
 
     mapping(uint16 => uint8) public NFTType; // tokenID (ID #) => nftID (1 = runner, 2 = bull.. etc)
     mapping(uint8 => uint8) public Risk; // NFT TYPE (not NFT ID) => % chance to get stolen
@@ -63,9 +63,9 @@ contract BullRun is IERC721Receiver, Ownable, ReentrancyGuard {
     uint16 public stakedAlphas;
     uint256 public currentEncierroId;
 
-    uint80 public minimumStakeTime;
-    uint256 public maxDuration;
-    uint256 public minDuration;
+    uint80 public minimumStakeTime = 0;
+    uint256 public maxDuration = 300;
+    uint256 public minDuration = 86400;
 
     // any rewards distributed when no Matadors are staked
     uint256 private unaccountedMatadorRewards;
@@ -82,7 +82,7 @@ contract BullRun is IERC721Receiver, Ownable, ReentrancyGuard {
     uint80 public claimEndTime;
     uint256 public constant PERIOD = 1440 minutes;
 
-    uint256 public SEED_COST = 0.001 ether;
+    uint256 public SEED_COST = 0.0038 ether;
 
     // an individual NFT being bet
     struct NFTBet {
@@ -188,61 +188,15 @@ contract BullRun is IERC721Receiver, Ownable, ReentrancyGuard {
 
     // @param: _minStakeTime should be # of SECONDS (ex: if minStakeTime is 1 day, pass 86400)
     // @param: _runner/bull/alphaMult = number of topia per period
-    // TOPIA: 0x218BF48694bb196F8dFCC0661b16ba03635459B0
-    // CoinFlip: 0xb84fbd2a3B28F93eEf23F5D46309eDDE3CA50378
-    // Randomizer: 0x3cb1dB3417958222e5C1A98bA859211b9402a12f
-    // Bullpen: 0x9c215c9Ab78b544345047b9aB604c9c9AC391100
-    // Arena: 0xF84BD9d391c9d4874032809BE3Fd121103de5F60
-    // Genesis: 0x810FeDb4a6927D02A6427f7441F6110d7A1096d5
-    // Alpha: 0x96Af517c414B3726c1B2Ecc744ebf9d292DCbF60
-    // HUB: 0x9FAd19Ecf23d440B87fF91Dd9424155e03D755cE
-    // MinStakeTime: 0
-    // RunnerMult = 18000000000000000000
-    // BullMult = 20000000000000000000
-    // AlphaMult = 35000000000000000000
-    // MatadorCut = 500
-    constructor(
-        address _topiaToken, 
-        address _coinFlipContract,
-        address _randomizer,
-        address _bullpen,
-        address _arena,
-        address _genesis,
-        address _alpha,
-        address _hub,
-        uint80 _minStakeTime,
-        uint256 _runnerMult,
-        uint256 _bullMult,
-        uint256 _alphaMult,
-        uint256 _matadorCut) {
+    constructor() {
 
         Risk[1] = 10; // runners
         Risk[2] = 10; // bulls
 
-        minimumStakeTime = _minStakeTime;
-
-        Genesis = IERC721(_genesis);
-        Alpha = IERC721(_alpha);
-
-        HubInterface = IHub(_hub);
-
-        TopiaInterface = ITopia(_topiaToken);
-
-        RandomizerContract = payable(_randomizer);
-        RandomizerInterface = IRandomizer(_randomizer);
-
-        MetatopiaCoinFlipRNGInterface = IMetatopiaCoinFlipRNG(_coinFlipContract);
-
-        BullpenContract = _bullpen;
-        BullpenInterface = IBullpen(_bullpen);
-
-        ArenaContract = _arena;
-        ArenaInterface = IArena(_arena);
-
-        runnerRewardMult = _runnerMult;
-        bullRewardMult = _bullMult;
-        alphaRewardMult = _alphaMult;
-        matadorCut = _matadorCut;
+        runnerRewardMult = 18 ether;
+        bullRewardMult = 20 ether;
+        alphaRewardMult = 35 ether;
+        matadorCut = 500;
     }
 
     receive() external payable {}
@@ -301,6 +255,15 @@ contract BullRun is IERC721Receiver, Ownable, ReentrancyGuard {
         ArenaInterface = IArena(_arenaContract);
     }
 
+    function setHUB(address _hub) external onlyOwner {
+        HubInterface = IHub(_hub);
+    }
+
+    function setRandomizer(address _randomizer) external onlyOwner {
+        RandomizerContract = payable(_randomizer);
+        RandomizerInterface = IRandomizer(_randomizer);
+    }
+
     // IN SECONDS
     function setMinStakeTime(uint80 _minStakeTime) external onlyOwner {
         minimumStakeTime = _minStakeTime;
@@ -349,6 +312,8 @@ contract BullRun is IERC721Receiver, Ownable, ReentrancyGuard {
     function getEnteredEncierrosLength(address _better) external view returns (uint256) {
         return EnteredEncierros[_better].length;
     }
+
+
 
     // CLAIM FUNCTIONS ----------------------------------------------------    
 
@@ -422,50 +387,57 @@ contract BullRun is IERC721Receiver, Ownable, ReentrancyGuard {
 
     // this fxn allows caller to claim winnings from their BET (not daily TOPIA)
     // @param: the calldata array is each of the tokenIDs they are attempting to claim FOR
-    function claimBetReward(uint256 _encierroId) external 
+    function claimManyBetRewards() external 
     nonReentrant notContract() {
-        require(_encierroId <= currentEncierroId , 
-        "Invalid id");
-        require(Encierros[_encierroId].status == Status.Claimable , 
-        "not claimable");
-        require(!HasClaimed[msg.sender][_encierroId] , 
-        "user already claimed");
-        require(HasBet[msg.sender][_encierroId] , 
-        "user did not bet");
-
-        uint8 winningResult = uint8(Encierros[_encierroId].flipResult);
-        require(winningResult <= 1 , "Invalid flip result");
 
         uint256 owed; // what caller collects for winning
+        for(uint i = 1; i <= EnteredEncierros[msg.sender].length; i++) {
+            if(Encierros[i].status == Status.Claimable && !HasClaimed[msg.sender][i] && HasBet[msg.sender][i]) {
+                uint8 winningResult = uint8(Encierros[i].flipResult);
+                require(winningResult <= 1 , "Invalid flip result");
+                for (uint16 z = 0; z < BetNFTsPerEncierro[msg.sender][i].length; z++) { // fetch their bet NFT ids for this encierro
+                    require(BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].player == msg.sender , 
+                    "not owner");
+                    
+                    // calculate winnings
+                    if (BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].choice == winningResult && 
+                        BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].typeOfNFT == 1) {
+                            // get how much topia was bet on this NFT id in this session
+                            uint256 topiaBetOnThisNFT = BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].amount;
+                            owed += (topiaBetOnThisNFT * 5) / 4;
 
-        for (uint16 i = 0; i < BetNFTsPerEncierro[msg.sender][_encierroId].length; i++) { // fetch their bet NFT ids for this encierro
-            require(BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].player == msg.sender , 
-            "not owner");
-            
-            // calculate winnings
-            if (BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].choice == winningResult && 
-                BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].typeOfNFT == 1) {
-                    // get how much topia was bet on this NFT id in this session
-                    uint256 topiaBetOnThisNFT = BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].amount;
-                    owed += (topiaBetOnThisNFT * 5) / 4;
+                    } else if (BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].choice == winningResult && 
+                               BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].typeOfNFT == 2) {
+                            // get how much topia was bet on this NFT id in this session
+                            uint256 topiaBetOnThisNFT = BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].amount;
+                            owed += (topiaBetOnThisNFT * 3) / 2;
 
-            } else if (BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].choice == winningResult && 
-                       BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].typeOfNFT == 2) {
-                    // get how much topia was bet on this NFT id in this session
-                    uint256 topiaBetOnThisNFT = BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].amount;
-                    owed += (topiaBetOnThisNFT * 3) / 2;
-
-            } else if (BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].choice == winningResult && 
-                       BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].typeOfNFT == 3) {
-                    // get how much topia was bet on this NFT id in this session
-                    uint256 topiaBetOnThisNFT = BetNFTInfo[BetNFTsPerEncierro[msg.sender][_encierroId][i]][_encierroId].amount;
-                    owed += (topiaBetOnThisNFT * 2);
+                    } else if (BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].choice == winningResult && 
+                               BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].typeOfNFT == 3) {
+                            // get how much topia was bet on this NFT id in this session
+                            uint256 topiaBetOnThisNFT = BetNFTInfo[BetNFTsPerEncierro[msg.sender][i][z]][i].amount;
+                            owed += (topiaBetOnThisNFT * 2);
+                    } else {
+                        continue;
+                    }
+                }
+                HasClaimed[msg.sender][i] = true;
+            } else {
+                continue;
             }
         }
-        HasClaimed[msg.sender][_encierroId] = true;
+
         TopiaInterface.mint(msg.sender, owed);
         HubInterface.emitTopiaClaimed(msg.sender, owed);
         emit BetRewardClaimed(msg.sender, owed);
+    }
+
+    function getUserNFTsPerEncierro(address account, uint256 _id) external view returns (uint16[] memory tokenIds) {
+        uint256 length = BetNFTsPerEncierro[account][_id].length;
+        tokenIds = new uint16[](length);
+        for(uint i = 0; i < length; i++) {
+            tokenIds[i] = BetNFTsPerEncierro[account][_id][i];
+        }
     }
 
     // STAKING FUNCTIONS ----------------------------------------------------
